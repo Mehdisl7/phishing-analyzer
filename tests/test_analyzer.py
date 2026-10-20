@@ -1,5 +1,7 @@
 import sys
 from pathlib import Path
+import random
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -176,3 +178,105 @@ def test_dns_error_adds_nothing(monkeypatch):
     base = analyzer.analyze(msg)["score"]
     result = analyzer.apply_dns(analyzer.analyze(msg), msg)
     assert result["score"] == base
+
+def leet_variant(brand):
+    #remplace o/l/e/s par 0/1/3/5 (None si la marque n'a aucun de ces caractères)
+    swap = {"o": "0", "l": "1", "e": "3", "s": "5"}
+    variant = "".join(swap.get(c, c) for c in brand)
+    return variant if variant != brand else None
+
+
+def rn_variant(brand):
+    #remplace 'm' par 'rn' (None si la marque n'a pas de m)
+    return brand.replace("m", "rn") if "m" in brand else None
+
+
+def doubled_variant(brand):
+    #double une lettre au milieu du nom (faute de frappe)
+    mid = len(brand) // 2
+    return brand[:mid] + brand[mid] + brand[mid:]
+
+
+@pytest.mark.parametrize("brand", analyzer.BRANDS)
+def test_real_brand_domain_is_not_flagged(brand):
+    assert analyzer.typosquat_check(f"{brand}.com") is None
+    assert analyzer.typosquat_check(f"mail.{brand}.fr") is None
+
+
+@pytest.mark.parametrize("brand", analyzer.BRANDS)
+def test_look_alike_characters_are_detected(brand):
+    for variant in (leet_variant(brand), rn_variant(brand)):
+        if variant is None:
+            continue
+        hit = analyzer.typosquat_check(f"{variant}.com")
+        assert hit is not None, variant
+        assert hit[0] == brand
+
+
+@pytest.mark.parametrize("brand", [b for b in analyzer.BRANDS if len(b) >= 6])
+def test_typo_is_detected_for_long_brands(brand):
+    hit = analyzer.typosquat_check(f"{doubled_variant(brand)}.com")
+    assert hit is not None
+    assert hit[0] == brand
+
+
+@pytest.mark.parametrize("brand", analyzer.BRANDS)
+@pytest.mark.parametrize("pattern", ["{b}-secure.com", "secure-{b}.net", "mon-{b}-login.fr"])
+def test_brand_plus_word_is_detected(brand, pattern):
+    hit = analyzer.typosquat_check(pattern.format(b=brand))
+    assert hit is not None
+    assert hit[0] == brand
+
+
+def test_random_domains_are_not_flagged():
+    rng = random.Random(42)  # graine fixe : le test est reproductible
+    letters = "bcdfghjkmnpqrtuvwxz"
+    for _ in range(200):
+        name = "".join(rng.choice(letters) for _ in range(10))
+        assert analyzer.typosquat_check(f"{name}.com") is None, name
+
+
+def test_rule_works_with_any_brand_list(monkeypatch):
+    #la règle ne dépend pas des marques codées en dur : on lui en donne d'autres
+    monkeypatch.setattr(analyzer, "BRANDS", ("macaisse", "monbanque"))
+    assert analyzer.typosquat_check("macaiss3.fr")[0] == "macaisse"
+    assert analyzer.typosquat_check("monbanque-secure.com")[0] == "monbanque"
+    assert analyzer.typosquat_check("paypa1.com") is None  # plus dans la liste
+
+
+def test_typosquat_adds_points_to_score(tmp_path):
+    brand = analyzer.BRANDS[0]
+    raw = (
+        f"From: alerte@{leet_variant(brand) or brand + '-x'}.com\n"
+        "Subject: Info\n"
+        "Content-Type: text/plain; charset=utf-8\n"
+        "\n"
+        "Bonjour.\n"
+    )
+    score, reasons = score_of_text(tmp_path, raw)
+    assert score >= 20
+    assert any("imitant" in r for r in reasons)
+
+@pytest.mark.parametrize("brand", analyzer.SHORT_BRANDS)
+def test_short_brand_real_domain_not_flagged(brand):
+    assert analyzer.typosquat_check(f"{brand}.com") is None
+
+
+@pytest.mark.parametrize("brand", analyzer.SHORT_BRANDS)
+def test_short_brand_look_alike_detected(brand):
+    for variant in (leet_variant(brand), rn_variant(brand)):
+        if variant is None:
+            continue
+        hit = analyzer.typosquat_check(f"{variant}.com")
+        assert hit is not None and hit[0] == brand, variant
+
+
+@pytest.mark.parametrize("name", ["free-games", "visa-voyage", "orange-vif",
+                                  "target-practice", "box-office", "signal-forum"])
+def test_common_words_are_not_flagged(name):
+    assert analyzer.typosquat_check(f"{name}.com") is None
+
+def test_brand_lists_do_not_overlap(): #on interdit les doublons entre les deux lists
+    assert set(analyzer.BRANDS).isdisjoint(analyzer.SHORT_BRANDS)
+    assert len(analyzer.BRANDS) == len(set(analyzer.BRANDS))
+    assert len(analyzer.SHORT_BRANDS) == len(set(analyzer.SHORT_BRANDS))

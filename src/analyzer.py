@@ -16,6 +16,7 @@ import argparse
 import time
 import dns.resolver
 import dns.exception
+import unicodedata
 
 
 URGENCY_WORDS = ("urgent", "suspendu", "immédiat", "24h", "verify", "action required", "urgent", "urgently", "immediately", "immediate", "suspended", "suspension", "deactivated", "disabled", "locked", "expired", "expiration", "terminate", "termination", "verify", "verification", "validate", "validation", "confirm", "confirmation", "unauthorized", "unusual", "suspicious", "security alert", "security warning", "fraud", "fraudulent", "compromised", "breach", "threat", "warning", "account", "password", "credential", "credentials", "login", "signin", "sign-in", "sign in", "username", "authentication", "authenticate", "access", "payment", "billing", "invoice", "transaction", "refund", "purchase", "order", "bank", "banking", "credit", "debit", "card", "wallet", "money", "transfer", "security", "identity", "personal", "information", "private", "document", "attachment", "notification", "alert", "request", "action", "required", "mandatory", "update", "renew", "renewal", "recover", "restore", "unlock", "click", "link")
@@ -125,6 +126,70 @@ def same_ext(att):
     guessed, _ = mimetypes.guess_type(att["name"])
     return guessed is not None and guessed != att["mime"]
 
+#gerer le typosquatting, par exemple si quelqu'un se fait passer pour microsoft en ecrivant rnicrosoft au lieu de micro...
+
+#marques souvent imitées :
+
+BRANDS = ("paypal", "microsoft", "amazon", "google", "apple", "netflix",
+          "facebook", "linkedin", "instagram", "whatsapp", "outlook",
+          "dropbox", "docusign", "laposte", "ameli")
+
+SHORT_BRANDS = (
+    "bnp", "lcl", "cic", "wise", "n26", "visa", "ups", "dhl", "dpd", "gls",
+    "ibm", "amd", "hp", "dell", "asus", "sony", "box", "mega", "caf", "ants",
+    "axa", "edx", "mgen", "maif", "macif", "sfr", "ovh", "ebay", "etsy",
+    "zoom", "slack", "uber", "bolt", "free", "teams", "target", "signal",
+    "notion", "hotels", "booking","orange", "temu", "fnac", "shein",
+    "lidl", "jira", "sosh", "xbox", "intel",
+)
+
+CONFUSABLES = str.maketrans({"0": "o", "1": "l", "3": "e", "5": "s", "$": "s", "@": "a"})
+
+
+def levenshtein(a, b):
+    #Nombre minimal de modifications (ajout, retrait, changement) entre a et b
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def normalize_label(label):
+    #Ramène un nom à sa forme 'lisible' : accents retirés, 0->o, 1->l, rn->m
+    label = unicodedata.normalize("NFKD", label.lower()).encode("ascii", "ignore").decode()
+    return label.translate(CONFUSABLES).replace("rn", "m").replace("vv", "w")
+
+
+def typosquat_check(domain):
+    #Renvoie (marque, type, points) si le domaine imite une marque, sinon None
+
+    parts = domain.lower().split(".")
+    if len(parts) < 2:
+        return None
+    label = parts[-2]  # 'paypa1' pour 'mail.paypa1.com'
+    if label in BRANDS or label in SHORT_BRANDS:
+        return None
+    normalized = normalize_label(label)
+
+    for brand in SHORT_BRANDS:
+        if normalized == brand:
+            return brand, "caractères trompeurs", 30
+
+    for brand in BRANDS:
+        if label == brand:
+            return None  # le vrai nom de la marque
+        if normalized == brand:
+            return brand, "caractères trompeurs", 30
+        # la distance est utilisee que pour les noms assez longs (évitez les faux positifs)
+        if len(brand) >= 6 and levenshtein(normalized, brand) == 1:
+            return brand, "faute de frappe", 25
+        if brand in label.split("-"):
+            return brand, "marque accolée à un autre mot", 20
+    return None
+
 def compute_score(msg):
 
     score = 0
@@ -138,6 +203,13 @@ def compute_score(msg):
     if returnd and fromd and returnd != fromd:
         score += 15
         reasons.append(f"+15 : Return-Path ({returnd}) different de From ({fromd})")
+
+    for field, dom in (("From", fromd), ("Reply-To", replyd)):
+        hit = typosquat_check(dom) if dom else None
+        if hit:
+            brand, kind, points = hit
+            score += points
+            reasons.append(f"+{points} : domaine {field} imitant {brand} ({kind}) : {dom}")
 
     for link in extract_links(get_html_body(msg)):
         if is_misleading(link):
@@ -340,6 +412,8 @@ def apply_dns(result, msg):
     result["score"] = min(result["score"], 100)
     result["risk_level"] = risk_level(result["score"])
     return result
+
+
 
 
 def main():
