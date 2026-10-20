@@ -24,7 +24,7 @@ would check by hand, then explains every point of the final score.
 - [x] JSON output (`--json`) 
 - [x] Enrichment (domain age, VirusTotal lookup by hash)
 - [x] Own SPF/DMARC verification via DNS
-- [ ] Typosquatting detection
+- [x] Typosquatting detection
 
 ## Installation
 
@@ -237,6 +237,46 @@ python src/analyzer.py path/to/email.eml --vt --dns --json
 | DMARC `p=none` (monitoring only) | +5 |
 
 This measures how well the domain is protected against spoofing. It does **not** check whether the sending IP is authorized by SPF (full SPF evaluation is a future improvement). If the DNSquery fails, the tool prints a warning and adds no points. Note that the lookup sends DNS queries about the sender's domain.
+
+## Typosquatting detection
+
+The tool checks whether the domain of the `From` and `Reply-To` addresses imitates a well-known brand (for example `paypa1.com` instead of `paypal.com`). This check is **offline**: it needs no network access and no option.
+
+Such emails can pass SPF, DKIM and DMARC, because the attacker configures his own look-alike domain correctly. That is why this rule complements the authentication checks.
+
+### How it works
+
+1. The domain name is isolated (`mail.paypa1.com` gives `paypa1`).
+2. If it is exactly a known brand, it is **not** flagged (`paypal.com` is the real site).
+3. Look-alike characters are normalized (`0`→`o`, `1`→`l`, `3`→`e`, `5`→`s`, `rn`→`m`, `vv`→`w`) and accents are removed.
+4. The result is compared with the brand lists.
+
+### Detected techniques
+
+| Technique | Example | Score impact |
+|-----------|---------|--------------|
+| Look-alike characters | `paypa1.com`, `arnazon.com` | +30 |
+| Typo (edit distance of 1) | `gooogle.com` | +25 |
+| Brand + another word | `paypal-secure.com` | +20 |
+
+The score is added once per address (`From` and `Reply-To` are checked separately).
+
+### Brand lists
+
+- `BRANDS`: distinctive brand names. All three techniques apply.
+- `SHORT_BRANDS`: short or common names (`orange`, `free`, `visa`, `target`...). Only the look-alike character rule applies, to avoid false positives such as `orange-vif.fr` or `free-games.fr`.
+
+To add a brand, put its name in lowercase, without extension, accents or hyphens (for example `"societegenerale"`). Use `SHORT_BRANDS` for short or common words. A test checks that the two lists never overlap.
+
+### Limitations
+
+- The brand list is built in and static: an imitated brand that is not in the list is not detected.
+- Only the name before the extension is compared: `paypal.xyz` and misleading subdomains such as `paypal.com.evil.example` are not flagged.
+- Non-Latin look-alike letters (for example a Cyrillic "а") are only caught indirectly, through the edit distance.
+- A legitimate domain close to a brand name can be flagged by mistake, so the weights are kept moderate.
+
+##scoring
+| Sender domain imitating a brand (look-alike: 30, typo: 25, brand + word: 20) | +20 to +30 |
 
 
 ## Safety
